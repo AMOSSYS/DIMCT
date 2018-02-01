@@ -18,7 +18,6 @@ Inline hooks are placed in top of any identified function. The hook points towar
 
 It follows this scheme:
 <center><img src="/img/dimct_1.png" alt="Figure1" title="DIMCT flow" width="80%" height="80%"/><br/>
-**Figure 1: DIMCT flow**
 </center>
 
 The reasons why we call this tool "dirty" are the following ones:
@@ -33,7 +32,6 @@ In order to face this problem and use absolute addresses, we replaced `CALLS` an
 
 As an example, here are the original function, the configuration file and the final result:
 <center><img src="/img/dimct_2.png" alt="Figure1" title="DIMCT trampolines" width="80%" height="80%"/><br/>
-**Figure 2: DIMCT trampolines**
 </center>
 
 ### Improvements ###
