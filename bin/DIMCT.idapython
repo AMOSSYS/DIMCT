@@ -1,0 +1,281 @@
+from idautils import *
+from idaapi import *
+
+jno_instruction = '700668XXXXC3'        # jno <> jo
+jo_instruction = '710668XXXXC3'            # jo <> jno
+jnb_instruction = '720668XXXXC3'        # jnb <> jb
+jb_instruction = '730668XXXXC3'            # jb <> jnb
+jnz_instruction = '740668XXXXC3'        # jnz <> jz
+jz_instruction = '750668XXXXC3'            # jz <> jnz
+ja_instruction = '760668XXXXC3'            # ja <> jna
+jna_instruction = '770668XXXXC3'        # jna <> ja
+jns_instruction = '780668XXXXC3'        # jns <> js
+js_instruction = '790668XXXXC3'            # js <> jns
+jnp_instruction = '7A0668XXXXC3'        # jnp <> jp
+jp_instruction = '7B0668XXXXC3'            # jp <> jnp
+jge_instruction = '7C0668XXXXC3'        # jge <> jl
+jl_instruction = '7D0668XXXXC3'            # jl <> jge
+jg_instruction = '7E0668XXXXC3'            # jg <> jle
+jle_instruction = '7F0668XXXXC3'        # jle <> jg
+jmp_instruction = '68XXXXC3'            # jmp
+call_instruction = '68XXXX83C4043EFF5424FC'        # call <> push addr / add esp, 4 / call dword ptr ds:[esp-4]
+
+ins_swaps = []
+ins_swaps.append(["js", js_instruction])
+ins_swaps.append(["jno", jno_instruction])
+ins_swaps.append(["jo", jo_instruction])
+ins_swaps.append(["jnp", jnp_instruction])
+ins_swaps.append(["jpo", jnp_instruction])
+ins_swaps.append(["jp", jp_instruction])
+ins_swaps.append(["jpe", jp_instruction])
+ins_swaps.append(["jg", jg_instruction])
+ins_swaps.append(["jnle", jg_instruction])
+ins_swaps.append(["jle", jle_instruction])
+ins_swaps.append(["jng", jle_instruction])
+ins_swaps.append(["jge", jge_instruction])
+ins_swaps.append(["jnl", jge_instruction])
+ins_swaps.append(["jns", jns_instruction])
+ins_swaps.append(["jl", jl_instruction])
+ins_swaps.append(["jnge", jl_instruction])
+ins_swaps.append(["jna", jna_instruction])
+ins_swaps.append(["jbe", jna_instruction])
+ins_swaps.append(["ja", ja_instruction])
+ins_swaps.append(["jnbe", ja_instruction])
+ins_swaps.append(["jnb", jnb_instruction])
+ins_swaps.append(["jae", jnb_instruction])
+ins_swaps.append(["jnc", jnb_instruction])
+ins_swaps.append(["jb", jb_instruction])
+ins_swaps.append(["jc", jb_instruction])
+ins_swaps.append(["jnae", jb_instruction])
+ins_swaps.append(["jnz", jnz_instruction])
+ins_swaps.append(["jne", jnz_instruction])
+ins_swaps.append(["jz", jz_instruction])
+ins_swaps.append(["je", jz_instruction])
+ins_swaps.append(["jmp", jmp_instruction])
+ins_swaps.append(["call", call_instruction])
+
+base = get_imagebase()
+end = get_last_seg().endEA
+name = GetInputFile() 
+
+def get_entry(rva, saved_bytes, nopz_needed, relocs):
+    # saved bytes prologue:  pop eax / add esp, 4
+    saved_bytes = "5883c404".decode("hex")+saved_bytes
+    ndata = struct.pack("<L", rva)
+    ndata += struct.pack("<L", len(relocs))
+    ndata += struct.pack("<L", len(saved_bytes))
+    ndata += struct.pack ("<L", nopz_needed)
+    ndata += saved_bytes
+    for i in relocs:
+        ndata += struct.pack("<L", i+4)
+    ndata = struct.pack("<L", len(ndata) + 4) + ndata
+    return ndata
+    
+    
+def get_instruction(addr, f_addr):
+    global ins_swaps, base, end
+    mn = GetMnem(addr)
+    instruction_found = False
+    
+    # check in our default instructions swaps
+    for x in ins_swaps:
+        if mn.lower() == x[0].lower():
+            if mn.lower() in ("call", "jmp"):
+                # skip jmp dword ptr/call dword ptr
+                if Byte(addr) == 0xFF:
+                    break
+            instruction_found = True
+            # register, ignored
+            if GetOpType(addr, 0) == 1:
+                break
+                
+            ref_addr = GetOperandValue(addr, 0)
+            # invalid address, warn
+            if ref_addr < base:             
+                print "WARNING: bad jump at "+hex(addr).replace("L","")+" !"
+                break
+                
+            # short jmp within the copied bytes, ignored
+            if ref_addr >= f_addr and ref_addr <= f_addr + 5:
+                break
+                
+            ref_addr = ref_addr - base
+            pz = x[1].find("XXXX")
+            return (x[1][:pz].decode("hex") + struct.pack("<L", ref_addr) + x[1][pz+4:].decode("hex"), pz/2)
+           
+    # if not found (i.e not previously ignored from our 'JMP' search), let's check if any absolute address may be found
+    instruction = GetManyBytes(addr, ItemSize(addr))
+    cnt = 0
+    if instruction_found is False:
+        x = 0
+        while True:
+            n = GetOperandValue(addr, x)
+            if n == -1:
+                break
+            if n > base and n < end:
+                cnt = instruction.find(struct.pack("<L", n))
+                if cnt > 0 and cnt is not None:
+                    instruction = instruction.replace(struct.pack("<L", n), struct.pack("<L", n - base))
+                    break
+                else:
+                    print "Cant parse at 0x%x"% (addr)
+                    cnt = 0
+            x = x+1
+    return (instruction, cnt)
+    
+def create_config(path="config.bin", fullsubs=False):
+    global ins_swaps, base, end, name
+    ea = BeginEA()
+    entries = []
+    for functionStart in Functions(SegStart(ea), SegEnd(ea)):
+        functionEnd = FindFuncEnd(functionStart)
+        fName = GetFunctionName(functionStart)
+        if fullsubs is False:
+            if fName.startswith("sub_"):
+                continue
+        functionSize = functionEnd - functionStart
+        if functionSize <= 5:
+            continue
+        functionRva = functionStart - base
+        funcBytes = ''
+        real_instructions = ''
+        curPtr = functionStart
+        relocs = []
+        while len(funcBytes) < 5:
+            if curPtr != functionStart:
+                if get_next_cref_to(curPtr, 1) != BADADDR:
+                    relocs = None
+                    break
+            curPtr2 = NextHead(curPtr)
+            funcBytes += GetManyBytes(curPtr, curPtr2-curPtr)
+            instruction, reloc = get_instruction(curPtr, functionStart)
+            if reloc != 0:
+                reloc += len(real_instructions)
+                relocs.append(reloc)
+            real_instructions += instruction
+            curPtr = curPtr2
+        if relocs is not None:        
+            nopz_needed = len(funcBytes) - 5
+            entries.append(get_entry(functionRva, real_instructions, nopz_needed, relocs))
+    xdata = name+ "\x00" + struct.pack("<L", len(entries))
+    c = 0
+    for entry in entries:
+        xdata += entry
+        c += 1
+    print "%d subs will be monitored" % (c)
+    open(path,"wb").write(xdata)
+    print path+" file saved"
+    
+def parse_output(out_path="log.bin", rename=False):
+    global base, end, name
+    x = open(out_path, "rb").read()
+    print "Modules list:"
+    mods = []
+    while True:
+        p = x.find("|")
+        r = x[:p]
+        x = x[p+1:]
+        if len(r) == 0:
+            break
+        (modName, startAddr, endAddr) = r.split("!")
+        print "%s : %s - %s" % (modName, startAddr, endAddr)
+        mods.append([modName, int(startAddr, 16), int(endAddr, 16)])
+    
+    matchs = []
+    called = []
+    module_base = None
+    
+    print "Calls list:"
+    itemz = [x[i:i+8] for i in range(0, len(x), 8)]
+    itemz = set(itemz)
+    for item in itemz:
+        n2 = struct.unpack("<L",item[:4])[0] - 5
+        n1 = struct.unpack("<L",item[4:])[0]
+        if n1 != 0 and n2 != 0:
+            # print "%x -> %x" % (n1, n2)
+            called.append(n2)
+            for Ax in mods:
+                if module_base is None and n2 > Ax[1] and n2 < Ax[2]:
+                    module_base = Ax[1] 
+                if n1 > Ax[1] and n1 < Ax[2]:
+                    matchs.append(Ax[0])
+                    
+    print "Unique callers:"
+    matchs = set(matchs)
+    for m in matchs:
+        print m
+        
+    print "Unique called subs:"
+    called = set(called)
+    if module_base is None:
+        print "Could not locate the module (wtf?), defaulting to its static address"
+        module_base = base
+        
+    for m in called:
+        fAddr = ( m - module_base + base ) & 0xFFFFFFFF
+        fName = GetFunctionName(fAddr)
+        if fName is not None:
+            if rename is True:
+                MakeNameEx(fAddr, "called_"+fName, SN_NOWARN)
+        else:
+            fName = ''
+        print hex(fAddr).replace("L","")+' '+fName
+        
+        
+def whocalled(function, out_path="log.bin"):
+    global base, end, name
+    x = open(out_path, "rb").read()
+    mods = []
+    while True:
+        p = x.find("|")
+        r = x[:p]
+        x = x[p+1:]
+        if len(r) == 0:
+            break
+        (modName, startAddr, endAddr) = r.split("!")
+        mods.append([modName, int(startAddr, 16), int(endAddr, 16)])
+    
+    module_base = None
+    functionAddr = 0
+    if type(function) is str:
+        functionAddr = LocByName(function)
+        if functionAddr == 0xFFFFFFFF:
+            print "Bad function name."
+            return
+    elif type(function) is not int:
+        print "Bad function"
+        return
+    else:
+        functionAddr = int(function)
+    
+    matchs = []
+    itemz = [x[i:i+8] for i in range(0, len(x), 8)]
+    itemz = set(itemz)
+    for item in itemz:
+        n2 = struct.unpack("<L",item[:4])[0] - 5
+        n1 = struct.unpack("<L",item[4:])[0]
+        if n1 != 0 and n2 != 0:
+            if module_base is None:
+                for Ax in mods:
+                    if module_base is None and n2 > Ax[1] and n2 < Ax[2]:
+                        module_base = Ax[1] 
+            if n2-module_base+base == functionAddr:
+                res = hex(n1)
+                for Ax in mods:
+                    if n1 > Ax[1] and n1 < Ax[2]:
+                        res = Ax[0]+" : "+hex(n1)
+                matchs.append(res)
+    print "Unique callers:"
+    matchsZ = set(matchs)
+    for m in matchsZ:
+        print m + " called "+str(matchs.count(m))+" times"
+        
+    
+print "Create the config file by calling create_config(). Parameters:"
+print "\tpath: the output file (defaults to 'config.bin')"
+print "\tallsubs: also log non renamed subs (defaults to False)"
+print "e.g: create_config('config.bin', True)"
+print ""
+print "Load the results with parse_output(). Parameters:"
+print "\tout_path: the input (results) file (defaults to 'log.bin')"
+print "\trename: rename subs by adding a prefix (defaults to False)"
